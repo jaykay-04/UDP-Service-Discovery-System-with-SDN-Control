@@ -198,16 +198,6 @@ Inside Mininet, with the registry running:
 client1 python3 /path/to/udp-service-discovery/benchmark.py --registry-ip 10.0.0.1 --service weather --count 100
 ```
 
-### Measured results
-
-Fill these in from your own runs.
-
-| Metric | Value |
-|---|---|
-| Discovery success rate (100 queries) | _TODO_ |
-| Discovery latency avg / min / max | _TODO_ |
-| Failure detection time (kill → `BLOCK_HOST`), mean of N runs | _TODO_ |
-| Recovery time (restart → rule removed) | _TODO_ |
 
 **Static vs dynamic:** with the plain `ryu.app.simple_switch_13` controller, no drop rule is installed after a server dies and the network keeps forwarding traffic toward the dead host. With this project's controller, the switch blocks it within seconds of failure detection. The benefit is policy following availability, not faster normal discovery.
 
@@ -247,6 +237,4 @@ Fill these in from your own runs.
 - Round-robin or health-scored endpoint selection
 - Registry replication
 
-## License
 
-Add a license of your choice (MIT is common for coursework projects).
