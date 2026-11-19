@@ -1,0 +1,184 @@
+UDP SERVICE DISCOVERY + SDN (MININET + RYU) - DEMO RUNBOOK
+===========================================================
+Project folder : /home/abhinav-jk/Downloads/udp-service-discovery
+Ryu            : ~/ryuenv/bin/ryu-manager
+Helper files   : ~/demo_start.txt, ~/demo_restart_weather.txt
+
+TERMINALS
+  T1 = Ryu controller   (open in project folder)
+  T2 = Mininet prompt   (open in project folder)
+  T3 = plain terminal   (any folder; for flow table + event log)
+
+A: startup, in the order that avoids killing Ryu.
+B: discovery and invocation tests.
+C: the SDN crash, block and recovery demo.
+D: the registry-down test.
+E: the benchmark, failure-detection timing, and the static baseline comparison.
+F: shutdown, plus a troubleshooting list at the end.
+
+RULE: never run "sudo mn -c" after Ryu is started (it kills Ryu).
+
+
+-----------------------------------------------------------
+PART A - STARTUP
+-----------------------------------------------------------
+
+A1. [T3 / any terminal]  cleanup
+    cd ~/Downloads/udp-service-discovery
+    sudo mn -c
+    sudo ./scripts/reset_sdn_events.sh
+
+A2. [T1]  start controller
+    cd ~/Downloads/udp-service-discovery
+    sudo env SDN_EVENTS_FILE=/tmp/udp_sdn_events.jsonl ~/ryuenv/bin/ryu-manager ryu_controller.py
+    EXPECT: "ServiceDiscoverySDN started; watching ..."
+    (leave it running)
+
+A3. [T2]  start Mininet
+    cd ~/Downloads/udp-service-discovery
+    sudo python3 topology.py
+    EXPECT: mininet> prompt, and T1 prints "Switch connected: dpid=1"
+
+A4. [T2, at mininet>]  check connectivity
+    pingall
+    EXPECT: 0% dropped
+
+A5. [T2, at mininet>]  start registry + both servers
+    source /home/abhinav-jk/demo_start.txt
+    (wait 5 seconds)
+    registry cat /tmp/registry.log
+    EXPECT: "registered weather at 10.0.0.2:10000" and "registered maps at 10.0.0.3:10000"
+
+
+-----------------------------------------------------------
+PART B - DISCOVERY AND INVOCATION
+-----------------------------------------------------------
+
+B1. [T2]  list all services
+    client1 python3 /home/abhinav-jk/Downloads/udp-service-discovery/client.py --registry-ip 10.0.0.1
+    EXPECT: weather (10.0.0.2) and maps (10.0.0.3)
+
+B2. [T2]  discover + invoke weather
+    client1 python3 /home/abhinav-jk/Downloads/udp-service-discovery/client.py --registry-ip 10.0.0.1 --service weather --invoke --payload hello
+    EXPECT: RESPONSE "weather received: hello"
+
+B3. [T2]  second client, other service
+    client2 python3 /home/abhinav-jk/Downloads/udp-service-discovery/client.py --registry-ip 10.0.0.1 --service maps --invoke
+    EXPECT: RESPONSE from 10.0.0.3
+
+B4. [T2]  unknown service
+    client1 python3 /home/abhinav-jk/Downloads/udp-service-discovery/client.py --registry-ip 10.0.0.1 --service nonexistent
+    EXPECT: "No matching active services found."
+
+
+-----------------------------------------------------------
+PART C - SDN DYNAMIC BLOCKING (FAILURE + RECOVERY)
+-----------------------------------------------------------
+
+C1. [T3]  BEFORE: no drop rules
+    sudo ovs-ofctl -O OpenFlow13 dump-flows s1
+    sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep priority=100
+    EXPECT: second command prints nothing
+
+C2. [T2]  crash ONLY weather (abrupt kill, no UNREGISTER)
+    server1 pkill -9 -f "name weather"
+    (note the time; wait ~8 seconds)
+
+C3. [T1]  watch Ryu
+    EXPECT: "SDN BLOCK: installed drop rule for IPv4 destination 10.0.0.2"
+
+C4. [T3]  DURING: drop rule present
+    sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep priority=100
+    EXPECT: priority=100,ip,nw_dst=10.0.0.2 actions=drop   (only .2, not .3)
+
+C5. [T2]  prove selective block
+    client1 ping -c 2 10.0.0.2
+    EXPECT: 100% packet loss
+    client1 ping -c 2 10.0.0.3
+    EXPECT: 0% packet loss
+    client1 python3 /home/abhinav-jk/Downloads/udp-service-discovery/client.py --registry-ip 10.0.0.1
+    EXPECT: only "maps" listed
+
+C6. [T2]  registry evidence
+    registry tail -6 /tmp/registry.log
+    EXPECT: "EXPIRED weather ..." and BLOCK_HOST event
+
+C7. [T2]  RECOVER weather
+    source /home/abhinav-jk/demo_restart_weather.txt
+    (wait ~3 seconds)
+
+C8. [T1]  EXPECT: "SDN UNBLOCK: removed drop rule for IPv4 destination 10.0.0.2"
+
+C9. [T3]  AFTER: rule gone
+    sudo ovs-ofctl -O OpenFlow13 dump-flows s1 | grep priority=100
+    EXPECT: prints nothing
+
+C10. [T2] network restored
+    client1 ping -c 2 10.0.0.2
+    EXPECT: 0% packet loss
+    (a single "advertisement failed: timed out" line in /tmp/server1.log is normal)
+
+C11. [T3] full event history
+    cat /tmp/udp_sdn_events.jsonl
+
+
+-----------------------------------------------------------
+PART D - ROBUSTNESS: REGISTRY DOWN
+-----------------------------------------------------------
+
+D1. [T2]
+    registry pkill -f registry.py
+    client1 python3 /home/abhinav-jk/Downloads/udp-service-discovery/client.py --registry-ip 10.0.0.1
+    EXPECT: "Discovery failed: timed out" after ~2s (no hang)
+
+D2. [T2]  restart registry (servers re-register within a few seconds)
+    registry python3 /home/abhinav-jk/Downloads/udp-service-discovery/registry.py > /tmp/registry.log 2>&1 &
+
+
+-----------------------------------------------------------
+PART E - PERFORMANCE (SAVE THE OUTPUT)
+-----------------------------------------------------------
+
+E1. [T2]  discovery benchmark
+    client1 python3 /home/abhinav-jk/Downloads/udp-service-discovery/benchmark.py --registry-ip 10.0.0.1 --service weather --count 100
+    Record: success rate, average / min / max latency.
+
+E2. FAILURE-DETECTION TIME (repeat 3-5 times, average)
+    [T3] date +%s.%N          <- note this value, switch to T2 immediately
+    [T2] server1 pkill -9 -f "name weather"
+    [T3] cat /tmp/udp_sdn_events.jsonl   <- find new BLOCK_HOST "time"
+    detection time = BLOCK_HOST time - kill time
+    Restart weather before the next run (C7).
+
+E3. STATIC BASELINE (no SDN reaction)
+    Shut down (Part F), then restart with the plain learning switch in T1:
+      sudo ~/ryuenv/bin/ryu-manager ryu.app.simple_switch_13
+    Repeat A3-A5, kill weather, and show:
+      - no priority=100 rule appears in dump-flows
+      - ping to 10.0.0.2 is not blocked by the network
+    Compare with the dynamic run.
+
+
+-----------------------------------------------------------
+PART F - SHUTDOWN (always do this in order)
+-----------------------------------------------------------
+
+F1. [T2]  exit
+F2. [T1]  Ctrl+C
+F3. [T3]  sudo mn -c
+F4. Optional: save logs before /tmp is cleared
+    cp /tmp/registry.log /tmp/udp_sdn_events.jsonl ~/Downloads/udp-service-discovery/
+
+
+-----------------------------------------------------------
+TROUBLESHOOTING
+-----------------------------------------------------------
+- T1 never shows "Switch connected": Ryu not running or "mn -c" was run after
+  it started. Run "exit" in T2, "sudo mn -c", then restart from A1.
+- "ryu-manager: No such file": use the full path ~/ryuenv/bin/ryu-manager.
+- Port 6653 in use: sudo pkill -f ryu-manager
+- No "registered" lines: wait longer, or check "server1 cat /tmp/server1.log".
+- Typos at mininet>: node name, space, command (e.g. "server1 cat /tmp/server1.log").
+  Paste one line at a time.
+- "server1 pkill -9 -f service_server.py" kills BOTH servers; use
+  "server1 pkill -9 -f \"name weather\"" to kill only weather.
